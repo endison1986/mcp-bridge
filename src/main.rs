@@ -1,90 +1,93 @@
-use std::net::SocketAddr;
+use std::{net::SocketAddr, path::PathBuf, sync::Arc};
 
-use clap::{Parser, Subcommand};
+use anyhow::Context;
+use clap::Parser;
 use mcp_bridge::{
     agent::{self, AgentConfig},
-    relay::{self, LocalTarget, RelayState},
+    config::{Config, Mode},
+    gateway::Gateway,
+    relay::{self, RelayState},
 };
+use tracing_subscriber::EnvFilter;
 
 #[derive(Parser)]
-#[command(name = "mcp-bridge", version, about = "Expose local MCP services through a relay")]
+#[command(name = "mcp-bridge", version, about = "Aggregate local MCP servers and expose them through a relay")]
 struct Cli {
-    #[command(subcommand)]
-    mode: Mode,
-}
-
-#[derive(Subcommand)]
-enum Mode {
-    /// Run the public relay server
-    Relay {
-        #[arg(long, default_value = "0.0.0.0:8080")]
-        listen: SocketAddr,
-        /// Shared secret agents must present
-        #[arg(long, env = "MCP_BRIDGE_TOKEN")]
-        token: String,
-    },
-    /// Run an agent next to a local MCP service
-    Agent {
-        /// e.g. wss://relay.example.com/agent/ws
-        #[arg(long)]
-        relay: String,
-        /// Agent id; MCP clients reach it at /mcp/{id}
-        #[arg(long)]
-        id: String,
-        #[arg(long, env = "MCP_BRIDGE_TOKEN")]
-        token: String,
-        /// Local MCP endpoint, e.g. http://127.0.0.1:3000/mcp
-        #[arg(long)]
-        target: String,
-    },
-    /// Run relay and agent in one process; the local MCP service is served directly
-    Mixed {
-        #[arg(long, default_value = "0.0.0.0:8080")]
-        listen: SocketAddr,
-        #[arg(long, env = "MCP_BRIDGE_TOKEN")]
-        token: String,
-        /// Id clients use in /mcp/{id}
-        #[arg(long)]
-        id: String,
-        /// Local MCP endpoint, e.g. http://127.0.0.1:3000/mcp
-        #[arg(long)]
-        target: String,
-    },
+    /// Path to the JSON configuration file
+    #[arg(short, long, default_value = "mcp-bridge.json")]
+    config: PathBuf,
+    /// Validate the configuration and exit
+    #[arg(long)]
+    check: bool,
 }
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
-        )
+        .with_env_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()))
         .init();
 
-    match Cli::parse().mode {
-        Mode::Relay { listen, token } => relay::serve(listen, RelayState::new(token, None)).await,
-        Mode::Agent {
-            relay,
-            id,
-            token,
-            target,
-        } => {
+    let cli = Cli::parse();
+    let config = Config::load(&cli.config)?;
+
+    if cli.check {
+        println!(
+            "{}: OK (mode={:?}, enabled servers={})",
+            cli.config.display(),
+            config.mode,
+            config.enabled_servers().count()
+        );
+        return Ok(());
+    }
+    if !config.security.enabled {
+        tracing::warn!("security.enabled is false: client and agent connections are NOT authenticated");
+    }
+
+    match config.mode {
+        Mode::Relay => {
+            let addr = listen_addr(&config)?;
+            relay::serve(addr, RelayState::new(&config, None)).await
+        }
+        Mode::Mixed => {
+            let addr = listen_addr(&config)?;
+            let gateway = Arc::new(start_gateway(&config).await?);
+            relay::serve(addr, RelayState::new(&config, Some(gateway))).await
+        }
+        Mode::Agent => {
+            let relay_ws = config.relay.clone().context("'relay' is required in agent mode")?;
+            let agent_id = config.agent_id.clone().context("'agent_id' is required in agent mode")?;
+            let gateway = Arc::new(start_gateway(&config).await?);
             agent::run(AgentConfig {
-                relay_ws: relay,
-                agent_id: id,
-                token,
-                target,
+                relay_ws,
+                agent_id,
+                token: agent_token(&config),
+                gateway,
             })
             .await
         }
-        Mode::Mixed {
-            listen,
-            token,
-            id,
-            target,
-        } => {
-            // Same process: no WebSocket hop, requests go straight to the local MCP service.
-            let state = RelayState::new(token, Some(LocalTarget::new(id, target)));
-            relay::serve(listen, state).await
-        }
     }
+}
+
+fn listen_addr(config: &Config) -> anyhow::Result<SocketAddr> {
+    config
+        .listen
+        .as_deref()
+        .context("'listen' is required in relay and mixed mode")?
+        .parse::<SocketAddr>()
+        .context("invalid 'listen' address")
+}
+
+fn agent_token(config: &Config) -> Option<String> {
+    if config.security.enabled {
+        config.security.agent_token.clone()
+    } else {
+        None
+    }
+}
+
+async fn start_gateway(config: &Config) -> anyhow::Result<Gateway> {
+    let gateway = Gateway::new(config);
+    tracing::info!(servers = gateway.server_count(), "starting local MCP servers");
+    gateway.preload().await?;
+    Ok(gateway)
 }

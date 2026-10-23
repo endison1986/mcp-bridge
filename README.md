@@ -1,37 +1,77 @@
 # mcp-bridge
 
-Expose local MCP services to the public internet through a relay, written in Rust.
+Aggregate local MCP servers and expose them to AI clients through one endpoint, optionally via a public relay.
+
+- One JSON config file (`--config`) holds everything. No other CLI options.
+- Only servers listed in the config are started and reachable. Disabled servers are not started.
+- Servers can be stdio commands (`command`, started by mcp-bridge) or existing HTTP endpoints (`url`).
+- AI clients configure a single URL, e.g. `https://relay.example.com/mcp`, and see the tools of every enabled server.
 
 ## Modes
 
-- `relay`: runs on a server with a public IP. Accepts agent connections and serves `/mcp/{id}`.
-- `agent`: runs on a private-network machine. Connects out to the relay and forwards requests to a local MCP endpoint.
-- `mixed`: runs relay and agent in one process.
+| mode | runs on | what it does |
+|---|---|---|
+| `relay` | public server | accepts agents over `/agent/ws`, serves the aggregate endpoint for all connected agents |
+| `agent` | private machine | runs the configured servers, connects out to the relay |
+| `mixed` | public server | runs the configured servers and the relay in one process |
 
 ## Usage
 
 ```bash
-export MCP_BRIDGE_TOKEN=change-me
+cargo build --release
+export MCP_BRIDGE_CLIENT_TOKEN='at-least-32-random-characters-xxxxxxxx'
+export MCP_BRIDGE_AGENT_TOKEN='at-least-32-random-characters-yyyyyyyy'
 
-# Public server
-mcp-bridge relay --listen 0.0.0.0:8080
-
-# Private machine
-mcp-bridge agent --relay wss://relay.example.com/agent/ws --id my-agent --target http://127.0.0.1:3000/mcp
-
-# Single process
-mcp-bridge mixed --listen 0.0.0.0:8080 --id my-agent --target http://127.0.0.1:3000/mcp
+mcp-bridge --config mcp-bridge.json --check   # validate only
+mcp-bridge --config mcp-bridge.json           # run
 ```
 
-MCP clients then use `https://relay.example.com/mcp/my-agent`.
+See `mcp-bridge.example.json` for a complete example. Design notes: `docs/配置与聚合设计.md`.
 
-## Protocol
+## Config reference
 
-- Agent connects to `GET /agent/ws?id={id}` with `Authorization: Bearer {token}`.
-- Each MCP HTTP request is sent to the agent as a JSON `ForwardRequest` text frame and answered with a `ForwardResponse` frame, matched by `id`.
-- Requests time out after 60s.
+Top level:
+
+| field | required | description |
+|---|---|---|
+| `mode` | yes | `relay`, `agent` or `mixed` |
+| `listen` | relay, mixed | HTTP listen address, e.g. `0.0.0.0:8080` |
+| `relay` | agent | relay WebSocket URL, e.g. `wss://relay.example.com/agent/ws` |
+| `agent_id` | agent | agent name; becomes the tool prefix on the relay |
+| `security` | no | see below |
+| `aggregate` | no | `path` (default `/mcp`), `tool_separator` (default `__`, empty string disables prefixes) |
+| `servers` | no | map of server name to server definition |
+
+Server definition: exactly one of `command` (array, stdio) or `url` (http/https). Optional `env` (stdio only) and `enabled` (default `true`).
+
+Security:
+
+| field | description |
+|---|---|
+| `enabled` | default `true`. When `false`, no token is checked anywhere and a warning is logged |
+| `client_auth.type` | `bearer` (header `Authorization: Bearer <token>`), `path` (`/mcp/<token>`), or `none` |
+| `client_auth.token` | required for `bearer` and `path`; at least 32 characters |
+| `agent_token` | required when enabled; at least 32 characters; agents must present it |
+
+`${NAME}` anywhere in the file is replaced with the environment variable `NAME` at startup. Values are inserted as raw text, so they must not contain `"` or `\`.
+
+## Tool naming
+
+Tools are exposed as `{server}{separator}{tool}`, e.g. `shell__exec`. In relay mode, agent tools are prefixed with the agent id: `{agent_id}{separator}{server}{separator}{tool}`, e.g. `office__shell__exec`. A duplicate name is an error.
+
+## Endpoints
+
+| path | method | purpose |
+|---|---|---|
+| `aggregate.path` | POST | JSON-RPC: `initialize`, `ping`, `tools/list`, `tools/call`; notifications return 202 |
+| `aggregate.path/<token>` | POST | same, when `client_auth.type` is `path` |
+| `/agent/ws` | WebSocket | agent connection, requires `agent_token` |
+
+Other methods return 405 on the aggregate endpoint. Unauthenticated requests return 401.
 
 ## Limitations
 
-- `GET` (server-to-client SSE stream) is not supported yet; the relay returns 405.
-- Bodies are passed as UTF-8 text.
+- Streamable HTTP responses only; server-initiated SSE streams are not forwarded.
+- No TLS in the process; put a reverse proxy (Caddy, Nginx) in front for HTTPS/WSS.
+- Tool lists are fetched once and cached until restart. Failed servers are retried on the next request.
+- Relay routing of agent tools relies on the separator; use a non-empty `tool_separator` when more than one agent is connected.

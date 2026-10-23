@@ -1,0 +1,16 @@
+{
+  "mode": "mixed",
+  "listen": "0.0.0.0:8080",
+  "security": {
+    "enabled": true,
+    "client_auth": { "type": "bearer", "token": "${MCP_BRIDGE_CLIENT_TOKEN}" },
+    "agent_token": "${MCP_BRIDGE_AGENT_TOKEN}"
+  },
+  "aggregate": { "path": "/mcp", "tool_separator": "__" },
+  "servers": {
+    "shell": { "command": ["npx", "-y", "shell-exec-mcp"] },
+    "computer": { "command": ["npx", "-y", "computer-use-mcp"] },
+    "filesystem": { "command": ["npx", "-y", "filesystem-mcp"], "enabled": false },
+    "local-http": { "url": "http://127.0.0.1:3000/mcp" }
+  }
+}
