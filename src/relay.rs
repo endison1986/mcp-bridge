@@ -1,5 +1,8 @@
 //! Relay: public HTTP entry point. Agents connect in over WebSocket, and
 //! MCP clients reach an agent at `/mcp/{agent_id}`.
+//!
+//! In `mixed` mode the relay also holds a `LocalTarget`: requests for that id are
+//! forwarded straight to the local MCP service, without a WebSocket hop.
 
 use std::{
     collections::HashMap,
@@ -26,6 +29,7 @@ use futures_util::{SinkExt, StreamExt};
 use serde::Deserialize;
 use tokio::sync::{mpsc, oneshot};
 
+use crate::agent::forward;
 use crate::protocol::{ForwardRequest, ForwardResponse, FORWARDED_HEADERS};
 
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
@@ -39,9 +43,28 @@ struct AgentHandle {
     pending: Pending,
 }
 
+/// An agent that lives in the same process as the relay (mixed mode).
+#[derive(Clone)]
+pub struct LocalTarget {
+    id: String,
+    target: String,
+    http: reqwest::Client,
+}
+
+impl LocalTarget {
+    pub fn new(id: String, target: String) -> Self {
+        Self {
+            id,
+            target,
+            http: reqwest::Client::new(),
+        }
+    }
+}
+
 struct Inner {
     agent_token: String,
     agents: Mutex<HashMap<String, AgentHandle>>,
+    local: Option<LocalTarget>,
     next_req: AtomicU64,
     next_conn: AtomicU64,
 }
@@ -50,10 +73,11 @@ struct Inner {
 pub struct RelayState(Arc<Inner>);
 
 impl RelayState {
-    pub fn new(agent_token: String) -> Self {
+    pub fn new(agent_token: String, local: Option<LocalTarget>) -> Self {
         Self(Arc::new(Inner {
             agent_token,
             agents: Mutex::new(HashMap::new()),
+            local,
             next_req: AtomicU64::new(1),
             next_conn: AtomicU64::new(1),
         }))
@@ -166,22 +190,30 @@ async fn mcp_proxy(
             .into_response();
     }
 
+    let fwd_headers = forwarded_headers(&headers);
+    let req_body = String::from_utf8_lossy(&body).into_owned();
+
+    // mixed mode: the agent is in this process, so call the local MCP service directly.
+    if let Some(local) = state.0.local.as_ref().filter(|l| l.id == id) {
+        let req = ForwardRequest {
+            id: next_req_id(&state),
+            method: method.to_string(),
+            headers: fwd_headers,
+            body: req_body,
+        };
+        return match tokio::time::timeout(REQUEST_TIMEOUT, forward(&local.http, &local.target, req)).await {
+            Ok(resp) => build_response(resp),
+            Err(_) => (StatusCode::GATEWAY_TIMEOUT, "local MCP service timed out").into_response(),
+        };
+    }
+
+    // relay mode: forward to the agent connected over WebSocket.
     let handle = state.0.agents.lock().unwrap().get(&id).cloned();
     let Some(handle) = handle else {
         return (StatusCode::NOT_FOUND, "agent not connected").into_response();
     };
 
-    let req_id = state.0.next_req.fetch_add(1, Ordering::Relaxed);
-    let fwd_headers: Vec<(String, String)> = FORWARDED_HEADERS
-        .iter()
-        .filter_map(|name| {
-            headers
-                .get(*name)
-                .and_then(|v| v.to_str().ok())
-                .map(|v| (name.to_string(), v.to_string()))
-        })
-        .collect();
-
+    let req_id = next_req_id(&state);
     let (resp_tx, resp_rx) = oneshot::channel();
     handle.pending.lock().unwrap().insert(req_id, resp_tx);
 
@@ -189,7 +221,7 @@ async fn mcp_proxy(
         id: req_id,
         method: method.to_string(),
         headers: fwd_headers,
-        body: String::from_utf8_lossy(&body).into_owned(),
+        body: req_body,
     };
     if handle.tx.send(req).is_err() {
         handle.pending.lock().unwrap().remove(&req_id);
@@ -204,6 +236,22 @@ async fn mcp_proxy(
             (StatusCode::GATEWAY_TIMEOUT, "agent timed out").into_response()
         }
     }
+}
+
+fn next_req_id(state: &RelayState) -> u64 {
+    state.0.next_req.fetch_add(1, Ordering::Relaxed)
+}
+
+fn forwarded_headers(headers: &HeaderMap) -> Vec<(String, String)> {
+    FORWARDED_HEADERS
+        .iter()
+        .filter_map(|name| {
+            headers
+                .get(*name)
+                .and_then(|v| v.to_str().ok())
+                .map(|v| (name.to_string(), v.to_string()))
+        })
+        .collect()
 }
 
 fn build_response(resp: ForwardResponse) -> Response {

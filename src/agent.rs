@@ -80,7 +80,7 @@ async fn connect_once(cfg: &AgentConfig, http: &reqwest::Client) -> anyhow::Resu
     }
 }
 
-async fn forward(http: &reqwest::Client, target: &str, req: ForwardRequest) -> ForwardResponse {
+pub async fn forward(http: &reqwest::Client, target: &str, req: ForwardRequest) -> ForwardResponse {
     let method = reqwest::Method::from_bytes(req.method.as_bytes()).unwrap_or(reqwest::Method::POST);
     let mut builder = http.request(method, target).body(req.body);
     for (k, v) in &req.headers {

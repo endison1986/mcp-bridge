@@ -3,7 +3,7 @@ use std::net::SocketAddr;
 use clap::{Parser, Subcommand};
 use mcp_bridge::{
     agent::{self, AgentConfig},
-    relay::{self, RelayState},
+    relay::{self, LocalTarget, RelayState},
 };
 
 #[derive(Parser)]
@@ -37,14 +37,16 @@ enum Mode {
         #[arg(long)]
         target: String,
     },
-    /// Run relay and agent in a single process
+    /// Run relay and agent in one process; the local MCP service is served directly
     Mixed {
         #[arg(long, default_value = "0.0.0.0:8080")]
         listen: SocketAddr,
         #[arg(long, env = "MCP_BRIDGE_TOKEN")]
         token: String,
+        /// Id clients use in /mcp/{id}
         #[arg(long)]
         id: String,
+        /// Local MCP endpoint, e.g. http://127.0.0.1:3000/mcp
         #[arg(long)]
         target: String,
     },
@@ -59,7 +61,7 @@ async fn main() -> anyhow::Result<()> {
         .init();
 
     match Cli::parse().mode {
-        Mode::Relay { listen, token } => relay::serve(listen, RelayState::new(token)).await,
+        Mode::Relay { listen, token } => relay::serve(listen, RelayState::new(token, None)).await,
         Mode::Agent {
             relay,
             id,
@@ -80,19 +82,9 @@ async fn main() -> anyhow::Result<()> {
             id,
             target,
         } => {
-            // The agent in the same process connects to the relay over loopback.
-            let agent_cfg = AgentConfig {
-                relay_ws: format!("ws://127.0.0.1:{}/agent/ws", listen.port()),
-                agent_id: id,
-                token: token.clone(),
-                target,
-            };
-            let relay_task = tokio::spawn(relay::serve(listen, RelayState::new(token)));
-            tokio::select! {
-                r = relay_task => r??,
-                r = agent::run(agent_cfg) => r?,
-            }
-            Ok(())
+            // Same process: no WebSocket hop, requests go straight to the local MCP service.
+            let state = RelayState::new(token, Some(LocalTarget::new(id, target)));
+            relay::serve(listen, state).await
         }
     }
 }
