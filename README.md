@@ -42,7 +42,7 @@ Top level:
 | `aggregate` | no | `path` (default `/mcp`), `tool_separator` (default `__`, empty string disables prefixes) |
 | `servers` | no | map of server name to server definition |
 
-Server definition: exactly one of `command` (array, stdio) or `url` (http/https). Optional `env` (stdio only) and `enabled` (default `true`).
+Server definition: exactly one of `command` (array, stdio) or `url` (http/https). Optional `env` (stdio only), `headers` (url only, e.g. `{"Authorization": "Bearer ${TERMINAL_API_KEY}"}`) and `enabled` (default `true`).
 
 Security:
 

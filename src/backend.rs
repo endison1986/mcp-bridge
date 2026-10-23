@@ -36,7 +36,7 @@ impl Backend {
     pub fn from_config(name: &str, cfg: &ServerConfig) -> Self {
         match (&cfg.command, &cfg.url) {
             (Some(cmd), _) => Backend::Stdio(StdioBackend::new(name, cmd.clone(), cfg.env.clone())),
-            (None, Some(url)) => Backend::Http(HttpBackend::new(name, url.clone())),
+            (None, Some(url)) => Backend::Http(HttpBackend::new(name, url.clone(), cfg.headers.clone())),
             // Config validation guarantees exactly one of the two for enabled servers.
             (None, None) => unreachable!("server '{name}' has neither command nor url"),
         }
@@ -204,6 +204,7 @@ async fn write_line(session: &StdioSession, line: &str) -> std::io::Result<()> {
 pub struct HttpBackend {
     name: String,
     url: String,
+    headers: BTreeMap<String, String>,
     client: reqwest::Client,
     state: Mutex<HttpState>,
     next_id: AtomicU64,
@@ -216,7 +217,7 @@ struct HttpState {
 }
 
 impl HttpBackend {
-    fn new(name: &str, url: String) -> Self {
+    fn new(name: &str, url: String, headers: BTreeMap<String, String>) -> Self {
         let client = reqwest::Client::builder()
             .timeout(REQUEST_TIMEOUT)
             .build()
@@ -224,6 +225,7 @@ impl HttpBackend {
         Self {
             name: name.to_string(),
             url,
+            headers,
             client,
             state: Mutex::new(HttpState::default()),
             next_id: AtomicU64::new(1),
@@ -288,6 +290,9 @@ impl HttpBackend {
             .post(&self.url)
             .header("accept", "application/json, text/event-stream")
             .json(body);
+        for (key, value) in &self.headers {
+            req = req.header(key.as_str(), value.as_str());
+        }
         if let Some(sid) = session_id {
             req = req.header("mcp-session-id", sid);
         }

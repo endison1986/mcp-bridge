@@ -11,6 +11,7 @@
     "shell": { "command": ["npx", "-y", "shell-exec-mcp"] },
     "computer": { "command": ["npx", "-y", "computer-use-mcp"] },
     "filesystem": { "command": ["npx", "-y", "filesystem-mcp"], "enabled": false },
-    "local-http": { "url": "http://127.0.0.1:3000/mcp" }
+    "local-http": { "url": "http://127.0.0.1:3000/mcp" },
+    "terminal": { "url": "http://127.0.0.1:22346/mcp", "headers": { "Authorization": "Bearer ${TERMINAL_API_KEY}" } }
   }
 }

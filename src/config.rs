@@ -80,6 +80,9 @@ pub struct ServerConfig {
     pub url: Option<String>,
     #[serde(default)]
     pub env: BTreeMap<String, String>,
+    /// Extra HTTP headers for `url` servers, e.g. {"Authorization": "Bearer ..."}.
+    #[serde(default)]
+    pub headers: BTreeMap<String, String>,
     #[serde(default = "default_true")]
     pub enabled: bool,
 }
@@ -176,6 +179,15 @@ impl Config {
             }
             if !server.enabled {
                 continue;
+            }
+            if server.command.is_some() && !server.headers.is_empty() {
+                bail!("server '{name}': 'headers' is only supported for 'url' servers");
+            }
+            for (key, value) in &server.headers {
+                reqwest::header::HeaderName::from_bytes(key.as_bytes())
+                    .map_err(|_| anyhow!("server '{name}': invalid header name '{key}'"))?;
+                reqwest::header::HeaderValue::from_str(value)
+                    .map_err(|_| anyhow!("server '{name}': invalid value for header '{key}'"))?;
             }
             match (&server.command, &server.url) {
                 (Some(cmd), None) if !cmd.is_empty() => {}
