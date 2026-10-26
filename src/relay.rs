@@ -241,6 +241,7 @@ impl ToolProvider for RelayState {
             let prefix = format!("{agent_id}{}", self.0.separator);
             if let Some(original) = name.strip_prefix(prefix.as_str()) {
                 let mut forwarded = params.clone();
+                tracing::info!(agent = %agent_id, tool = %original, "forwarding tool call to agent");
                 if let Some(obj) = forwarded.as_object_mut() {
                     obj.insert("name".to_string(), Value::String(original.to_string()));
                 }

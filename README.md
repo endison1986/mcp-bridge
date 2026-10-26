@@ -69,6 +69,16 @@ Tools are exposed as `{server}{separator}{tool}`, e.g. `shell__exec`. In relay m
 
 Other methods return 405 on the aggregate endpoint. Unauthenticated requests return 401.
 
+## Logging
+
+Every `tools/call` is logged with the tool name, request id, duration and outcome:
+
+- `tool call started` (info)
+- `routing tool call to local server` (info, with the server name) or `forwarding tool call to agent` (info, with the agent id)
+- `tool call succeeded` (info), `tool call returned an error result` (warn) or `tool call failed` (warn, with the error code and message)
+
+The level is controlled with `RUST_LOG`, e.g. `RUST_LOG=info` (default) or `RUST_LOG=debug`.
+
 ## Limitations
 
 - Streamable HTTP responses only; server-initiated SSE streams are not forwarded.

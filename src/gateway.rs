@@ -141,6 +141,7 @@ impl ToolProvider for Gateway {
             .find(|e| e.name == name)
             .ok_or_else(|| RpcError::new(-32602, format!("unknown tool: {name}")))?;
         let server = hit.server;
+        tracing::info!(server = %self.servers[server].name, tool = %hit.original, "routing tool call to local server");
         if let Some(obj) = params.as_object_mut() {
             obj.insert("name".to_string(), Value::String(hit.original));
         }

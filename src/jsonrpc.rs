@@ -51,6 +51,16 @@ pub async fn dispatch<P: ToolProvider + ?Sized>(provider: &P, body: &str) -> Opt
         .to_string();
     let params = req.get("params").cloned().unwrap_or_else(|| json!({}));
 
+    let started = std::time::Instant::now();
+    let tool = if method == "tools/call" {
+        params.get("name").and_then(Value::as_str).unwrap_or_default().to_string()
+    } else {
+        String::new()
+    };
+    if method == "tools/call" {
+        tracing::info!(tool = %tool, request_id = %id, "tool call started");
+    }
+
     let result = match method.as_str() {
         "initialize" => Ok(json!({
             "protocolVersion": PROTOCOL_VERSION,
@@ -65,6 +75,17 @@ pub async fn dispatch<P: ToolProvider + ?Sized>(provider: &P, body: &str) -> Opt
         "tools/call" => provider.call_tool(params).await,
         other => Err(RpcError::new(-32601, format!("method not found: {other}"))),
     };
+
+    if method == "tools/call" {
+        let duration_ms = started.elapsed().as_millis();
+        match &result {
+            Ok(r) if r.get("isError").and_then(Value::as_bool).unwrap_or(false) => {
+                tracing::warn!(tool = %tool, request_id = %id, duration_ms, "tool call returned an error result");
+            }
+            Ok(_) => tracing::info!(tool = %tool, request_id = %id, duration_ms, "tool call succeeded"),
+            Err(e) => tracing::warn!(tool = %tool, request_id = %id, duration_ms, code = e.code, error = %e.message, "tool call failed"),
+        }
+    }
 
     Some(match result {
         Ok(r) => json!({ "jsonrpc": "2.0", "id": id, "result": r }).to_string(),
